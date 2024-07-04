@@ -19,4 +19,3 @@ as -o testdata/start.o testdata/start.s
 as -o testdata/print.o testdata/print.s
 
 assert 'testdata/test1.c' 'Hello, World!'
-assert 'testdata/test1.c' 'Hello, World'
