@@ -16,6 +16,20 @@
 #define PH_NUM 2
 #define ENTRY_POINT_SYMBOL "_start"
 
+enum {
+    UNKNOWN_SECTION = -1,
+    NULL_SECTION,
+    INIT_SECTION,
+    TEXT_SECTION,
+    RODATA_SECTION,
+    DATA_SECTION,
+    BSS_SECTION,
+    SYMTAB_SECTION,
+    STRTAB_SECTION,
+    SHSTRTAB_SECTION,
+    MAX_SECTION_INDEX,
+};
+
 typedef struct {
     Elf64_Shdr *header;
     char *name;
@@ -39,6 +53,22 @@ void error(const char *fmt, ...) {
     va_start(ap, fmt);
     vprintf(fmt, ap);
     exit(1);
+}
+
+int section_name_to_idx(const char *shname) {
+    if (strcmp(shname, ".init") == 0) {
+        return INIT_SECTION;
+    } else if (strcmp(shname, ".text") == 0) {
+        return TEXT_SECTION;
+    } else if (strcmp(shname, ".rodata") == 0) {
+        return RODATA_SECTION;
+    } else if (strcmp(shname, ".data") == 0) {
+        return DATA_SECTION;
+    } else if (strcmp(shname, ".bss") == 0) {
+        return BSS_SECTION;
+    }
+
+    return UNKNOWN_SECTION;
 }
 
 Obj *parse_obj(char *data) {
@@ -109,35 +139,28 @@ void apply_rela(Obj *obj, Section *rela_section, HashMap *global_symbols) {
 }
 
 void generate_executable(Vec *objs, char *output_path) {
-    Vec *init_sections = new_vec();
-    Vec *text_sections = new_vec();
-    Vec *rodata_sections = new_vec();
-    Vec *data_sections = new_vec();
-    Vec *bss_sections = new_vec();
+    Vec **sections = calloc(MAX_SECTION_INDEX, sizeof(Vec *));
+    for (int i = 0; i < MAX_SECTION_INDEX; ++i) {
+        sections[i] = new_vec();
+    }
 
     for (int i = 0; i < objs->len; ++i) {
         Obj *obj = (Obj *)objs->array[i];
         Section *sections_end = obj->sections + obj->header->e_shnum;
         for (Section *section = obj->sections; section != sections_end;
              ++section) {
-            if (strcmp(section->name, ".init") == 0) {
-                vec_push_back(init_sections, section);
-            } else if (strcmp(section->name, ".text") == 0) {
-                vec_push_back(text_sections, section);
-            } else if (strcmp(section->name, ".rodata") == 0) {
-                vec_push_back(rodata_sections, section);
-            } else if (strcmp(section->name, ".data") == 0) {
-                vec_push_back(data_sections, section);
-            } else if (strcmp(section->name, ".bss") == 0) {
-                vec_push_back(bss_sections, section);
+            int section_idx = section_name_to_idx(section->name);
+            if (section_idx == UNKNOWN_SECTION) {
+                continue;
             }
+            vec_push_back(sections[section_idx], section);
         }
     }
 
     Vec *code_segments = new_vec();
-    vec_concat(code_segments, init_sections);
-    vec_concat(code_segments, text_sections);
-    vec_concat(code_segments, rodata_sections);
+    vec_concat(code_segments, sections[INIT_SECTION]);
+    vec_concat(code_segments, sections[TEXT_SECTION]);
+    vec_concat(code_segments, sections[RODATA_SECTION]);
 
     // compute addr / offset of each section
     uint64_t header_size = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) * PH_NUM;
@@ -156,8 +179,8 @@ void generate_executable(Vec *objs, char *output_path) {
     uint64_t data_segment_begin =
         align_to(code_segment_end, SEGMENT_ALIGN) + base_offset % SEGMENT_ALIGN;
     uint64_t data_segment_end = data_segment_begin;
-    for (int i = 0; i < data_sections->len; ++i) {
-        Section *section = (Section *)(data_sections->array[i]);
+    for (int i = 0; i < sections[DATA_SECTION]->len; ++i) {
+        Section *section = (Section *)(sections[DATA_SECTION]->array[i]);
         data_segment_end =
             align_to(data_segment_end, section->header->sh_addralign);
         section->addr = data_segment_end;
@@ -165,8 +188,8 @@ void generate_executable(Vec *objs, char *output_path) {
         data_segment_end += section->header->sh_size;
     }
     uint64_t data_sections_end = data_segment_end;
-    for (int i = 0; i < bss_sections->len; ++i) {
-        Section *section = (Section *)(bss_sections->array[i]);
+    for (int i = 0; i < sections[BSS_SECTION]->len; ++i) {
+        Section *section = (Section *)(sections[BSS_SECTION]->array[i]);
         data_segment_end =
             align_to(data_segment_end, section->header->sh_addralign);
         section->addr = data_segment_end;
@@ -253,8 +276,8 @@ void generate_executable(Vec *objs, char *output_path) {
         Section *section = (Section *)code_segments->array[i];
         memcpy(buf + section->offset, section->data, section->header->sh_size);
     }
-    for (int i = 0; i < data_sections->len; ++i) {
-        Section *section = (Section *)data_sections->array[i];
+    for (int i = 0; i < sections[DATA_SECTION]->len; ++i) {
+        Section *section = (Section *)sections[DATA_SECTION]->array[i];
         memcpy(buf + section->offset, section->data, section->header->sh_size);
     }
 
