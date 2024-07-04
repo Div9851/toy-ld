@@ -16,6 +16,9 @@
 #define PH_NUM 2
 #define ENTRY_POINT_SYMBOL "_start"
 
+const char shstrtab[] = "\0.init\0.text\0.rodata\0.data\0.bss\0.shstrtab";
+const int shstrtab_pos[] = {0, 1, 7, 13, 21, 27, 32};
+
 enum {
     UNKNOWN_SECTION = -1,
     NULL_SECTION,
@@ -24,8 +27,6 @@ enum {
     RODATA_SECTION,
     DATA_SECTION,
     BSS_SECTION,
-    SYMTAB_SECTION,
-    STRTAB_SECTION,
     SHSTRTAB_SECTION,
     MAX_SECTION_INDEX,
 };
@@ -270,7 +271,6 @@ void generate_executable(Vec *objs, char *output_path) {
     phdr[1].p_align = SEGMENT_ALIGN;
 
     char *buf = calloc(BUF_SIZE, 1);
-    memcpy(buf, ehdr, sizeof(Elf64_Ehdr));
     memcpy(buf + sizeof(Elf64_Ehdr), phdr, sizeof(Elf64_Phdr) * PH_NUM);
     for (int i = 0; i < code_segments->len; ++i) {
         Section *section = (Section *)code_segments->array[i];
@@ -280,9 +280,41 @@ void generate_executable(Vec *objs, char *output_path) {
         Section *section = (Section *)sections[DATA_SECTION]->array[i];
         memcpy(buf + section->offset, section->data, section->header->sh_size);
     }
+    base_offset += (data_sections_end - data_segment_begin);
+
+    uint64_t shstrtab_offset = base_offset;
+    memcpy(buf + base_offset, shstrtab, sizeof(shstrtab));
+    base_offset += sizeof(shstrtab);
+
+    ehdr->e_shoff = base_offset;
+    ehdr->e_shnum = MAX_SECTION_INDEX;
+    ehdr->e_shstrndx = SHSTRTAB_SECTION;
+    memcpy(buf, ehdr, sizeof(Elf64_Ehdr));
+
+    Elf64_Shdr *shdr = calloc(MAX_SECTION_INDEX, sizeof(Elf64_Shdr));
+    for (int i = 1; i < SHSTRTAB_SECTION; ++i) {
+        if (sections[i]->len == 0) {
+            continue;
+        }
+        Section *first_section = (Section *)sections[i]->array[0];
+        Section *last_section =
+            (Section *)sections[i]->array[sections[i]->len - 1];
+        shdr[i] = *first_section->header;
+        shdr[i].sh_name = shstrtab_pos[i];
+        shdr[i].sh_addr = first_section->addr;
+        shdr[i].sh_offset = first_section->offset;
+        shdr[i].sh_size = (last_section->addr + last_section->header->sh_size) -
+                          first_section->addr;
+    }
+    shdr[SHSTRTAB_SECTION].sh_name = shstrtab_pos[SHSTRTAB_SECTION];
+    shdr[SHSTRTAB_SECTION].sh_type = SHT_STRTAB;
+    shdr[SHSTRTAB_SECTION].sh_offset = shstrtab_offset;
+    shdr[SHSTRTAB_SECTION].sh_size = sizeof(shstrtab);
+    memcpy(buf + base_offset, shdr, sizeof(Elf64_Shdr) * MAX_SECTION_INDEX);
+    base_offset += sizeof(Elf64_Shdr) * MAX_SECTION_INDEX;
 
     FILE *out = fopen(output_path, "w");
-    fwrite(buf, 1, base_offset + (data_sections_end - data_segment_begin), out);
+    fwrite(buf, 1, base_offset, out);
     fclose(out);
     chmod(output_path, 0755);
 }
