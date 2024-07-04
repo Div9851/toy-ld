@@ -7,7 +7,7 @@
 
 typedef struct {
     char *key;
-    uint64_t val;
+    void *val;
 } HashMapItem;
 
 typedef struct {
@@ -15,5 +15,5 @@ typedef struct {
 } HashMap;
 
 HashMap *new_hashmap();
-void hashmap_insert(HashMap *hmap, char *key, uint64_t val);
+void hashmap_insert(HashMap *hmap, char *key, void *val);
 HashMapItem *hashmap_find(HashMap *hmap, char *key);

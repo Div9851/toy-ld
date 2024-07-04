@@ -22,7 +22,7 @@ HashMap *new_hashmap() {
     return hmap;
 }
 
-void hashmap_insert(HashMap *hmap, char *key, uint64_t val) {
+void hashmap_insert(HashMap *hmap, char *key, void *val) {
     uint32_t idx = hash(key);
     while (hmap->array[idx] != NULL &&
            strcmp(hmap->array[idx]->key, key) != 0) {

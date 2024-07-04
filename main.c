@@ -40,6 +40,11 @@ typedef struct {
 } Section;
 
 typedef struct {
+    Section *section;
+    uint64_t offset;
+} Symbol;
+
+typedef struct {
     Elf64_Ehdr *header;
     Section sections[SECTIONS_SIZE];
     Elf64_Sym *symbols_begin;
@@ -72,7 +77,7 @@ int section_name_to_idx(const char *shname) {
     return UNKNOWN_SECTION;
 }
 
-Obj *parse_obj(char *data) {
+Obj *parse_obj(char *data, HashMap *global_symbols) {
     Obj *obj = calloc(1, sizeof(Obj));
     Elf64_Ehdr *elf_header = (Elf64_Ehdr *)data;
     Elf64_Shdr *section_header_table =
@@ -89,15 +94,31 @@ Obj *parse_obj(char *data) {
             symbol_table_section = &obj->sections[i];
         }
     }
+    obj->local_symbols = new_hashmap();
     if (symbol_table_section != NULL) {
         obj->symbols_begin = (Elf64_Sym *)symbol_table_section->data;
         obj->symbols_end = (Elf64_Sym *)(symbol_table_section->data +
                                          symbol_table_section->header->sh_size);
         obj->symbol_str_table =
             obj->sections[symbol_table_section->header->sh_link].data;
+        for (Elf64_Sym *symbol = obj->symbols_begin; symbol != obj->symbols_end;
+             ++symbol) {
+            if (symbol->st_shndx == SHN_UNDEF ||
+                symbol->st_shndx >= obj->header->e_shnum) {
+                continue;
+            }
+            char *symbol_name = obj->symbol_str_table + symbol->st_name;
+            Symbol *val = calloc(1, sizeof(Symbol));
+            val->section = &obj->sections[symbol->st_shndx];
+            val->offset = symbol->st_value;
+            if (ELF64_ST_BIND(symbol->st_info) == STB_GLOBAL) {
+                hashmap_insert(global_symbols, symbol_name, val);
+            } else if (ELF64_ST_BIND(symbol->st_info) == STB_LOCAL) {
+                hashmap_insert(obj->local_symbols, symbol_name, val);
+            }
+        }
     }
     obj->data = data;
-    obj->local_symbols = new_hashmap();
     return obj;
 }
 
@@ -117,14 +138,15 @@ void apply_rela(Obj *obj, Section *rela_section, HashMap *global_symbols) {
         char *symbol_name =
             obj->symbol_str_table +
             obj->symbols_begin[ELF64_R_SYM(rela->r_info)].st_name;
-        HashMapItem *symbol = hashmap_find(obj->local_symbols, symbol_name);
-        if (symbol == NULL) {
-            symbol = hashmap_find(global_symbols, symbol_name);
+        HashMapItem *item = hashmap_find(obj->local_symbols, symbol_name);
+        if (item == NULL) {
+            item = hashmap_find(global_symbols, symbol_name);
         }
-        if (symbol == NULL) {
+        if (item == NULL) {
             error("symbol '%s' does not exist\n", symbol_name);
         }
-        uint64_t symbol_addr = symbol->val;
+        Symbol *symbol = (Symbol *)item->val;
+        uint64_t symbol_addr = symbol->section->addr + symbol->offset;
         uint32_t rela_type = ELF64_R_TYPE(rela->r_info);
         if (rela_type == R_X86_64_PC32 || rela_type == R_X86_64_PLT32) {
             uint32_t val = symbol_addr + rela->r_addend -
@@ -139,7 +161,8 @@ void apply_rela(Obj *obj, Section *rela_section, HashMap *global_symbols) {
     }
 }
 
-void generate_executable(Vec *objs, char *output_path) {
+void generate_executable(Vec *objs, char *output_path,
+                         HashMap *global_symbols) {
     Vec **sections = calloc(MAX_SECTION_INDEX, sizeof(Vec *));
     for (int i = 0; i < MAX_SECTION_INDEX; ++i) {
         sections[i] = new_vec();
@@ -197,26 +220,6 @@ void generate_executable(Vec *objs, char *output_path) {
         data_segment_end += section->header->sh_size;
     }
 
-    // compute address of each symbol
-    HashMap *global_symbols = new_hashmap();
-    for (int i = 0; i < objs->len; ++i) {
-        Obj *obj = (Obj *)objs->array[i];
-        for (Elf64_Sym *symbol = obj->symbols_begin; symbol != obj->symbols_end;
-             ++symbol) {
-            if (symbol->st_shndx == SHN_UNDEF || symbol->st_shndx == SHN_ABS) {
-                continue;
-            }
-            char *symbol_name = obj->symbol_str_table + symbol->st_name;
-            uint64_t section_addr = obj->sections[symbol->st_shndx].addr;
-            uint64_t symbol_addr = section_addr + symbol->st_value;
-            if (ELF64_ST_BIND(symbol->st_info) == STB_GLOBAL) {
-                hashmap_insert(global_symbols, symbol_name, symbol_addr);
-            } else if (ELF64_ST_BIND(symbol->st_info) == STB_LOCAL) {
-                hashmap_insert(obj->local_symbols, symbol_name, symbol_addr);
-            }
-        }
-    }
-
     // apply relocation
     for (int i = 0; i < objs->len; ++i) {
         Obj *obj = (Obj *)objs->array[i];
@@ -229,10 +232,12 @@ void generate_executable(Vec *objs, char *output_path) {
         }
     }
 
-    HashMapItem *entry_point = hashmap_find(global_symbols, ENTRY_POINT_SYMBOL);
-    if (entry_point == NULL) {
+    HashMapItem *entry_point_item =
+        hashmap_find(global_symbols, ENTRY_POINT_SYMBOL);
+    if (entry_point_item == NULL) {
         error("entry point symbol '%s' is not found\n", ENTRY_POINT_SYMBOL);
     }
+    Symbol *entry_point = (Symbol *)entry_point_item->val;
 
     Elf64_Ehdr *ehdr = calloc(1, sizeof(Elf64_Ehdr));
     ehdr->e_ident[EI_MAG0] = ELFMAG0;
@@ -246,7 +251,7 @@ void generate_executable(Vec *objs, char *output_path) {
     ehdr->e_type = ET_EXEC;
     ehdr->e_machine = EM_X86_64;
     ehdr->e_version = EV_CURRENT;
-    ehdr->e_entry = entry_point->val;
+    ehdr->e_entry = entry_point->section->addr + entry_point->offset;
     ehdr->e_phoff = sizeof(Elf64_Ehdr);
     ehdr->e_ehsize = sizeof(Elf64_Ehdr);
     ehdr->e_phentsize = sizeof(Elf64_Phdr);
@@ -322,6 +327,7 @@ void generate_executable(Vec *objs, char *output_path) {
 int main(int argc, char **argv) {
     char *output_path = "a.out";
     Vec *objs = new_vec();
+    HashMap *global_symbols = new_hashmap();
     int i = 1;
     while (i < argc) {
         if (strcmp(argv[i], "-o") == 0) {
@@ -335,10 +341,10 @@ int main(int argc, char **argv) {
         fread(buf, BUF_SIZE, 1, in);
         fclose(in);
 
-        Obj *obj = parse_obj(buf);
+        Obj *obj = parse_obj(buf, global_symbols);
         vec_push_back(objs, obj);
         ++i;
     }
 
-    generate_executable(objs, output_path);
+    generate_executable(objs, output_path, global_symbols);
 }
